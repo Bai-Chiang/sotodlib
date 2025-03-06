@@ -261,7 +261,6 @@ class SimReadout(Operator):
             fsample,
             nsample,
             local_dets,
-            det2position,
     ):
         """Simulate cosmic ray glitches
 
@@ -272,6 +271,18 @@ class SimReadout(Operator):
         platescale = focalplane.detector_data.meta["platescale"].to_value(u.deg / u.mm)
         fov = focalplane.field_of_view.to_value(u.deg)
         diameter = fov / platescale
+
+        # Map detectors to their physical position on the focalplane
+        det2position = {}
+        xrot = qa.rotation(YAXIS, np.pi / 2)
+        for det in local_dets:
+            quat = focalplane[det]["quat"]
+            vec = qa.rotate(qa.mult(xrot, quat), ZAXIS)
+            lon, lat = hp.vec2dir(vec, lonlat=True)
+            x = lon / platescale
+            y = lat / platescale
+            det2position[det] = (x, y)
+
 
         # Glitches are simulated over a square grid and individual
         # detectors are affected based on their proximity to the event
@@ -359,7 +370,6 @@ class SimReadout(Operator):
             all_dets,
             local_dets,
             bias2det,
-            det2position,
     ):
         """Simulate glitches"""
         if not self.simulate_glitches:
@@ -387,7 +397,6 @@ class SimReadout(Operator):
                 fsample,
                 nsample,
                 local_dets,
-                det2position,
             )
 
         return
@@ -628,20 +637,6 @@ class SimReadout(Operator):
                     bias2det[tube][wafer][bias] = []
                 bias2det[tube][wafer][bias].append(det)
 
-            # Map detectors to their physical position on the focalplane
-            platescale = focalplane.detector_data.meta[
-                "platescale"
-            ].to_value(u.deg / u.mm)
-            det2position = {}
-            xrot = qa.rotation(YAXIS, np.pi / 2)
-            for det in local_dets:
-                quat = focalplane[det]["quat"]
-                vec = qa.rotate(qa.mult(xrot, quat), ZAXIS)
-                lon, lat = hp.vec2dir(vec, lonlat=True)
-                x = lon / platescale
-                y = lat / platescale
-                det2position[det] = (x, y)
-
             self._add_glitches(
                 comm,
                 obs_id,
@@ -651,7 +646,6 @@ class SimReadout(Operator):
                 all_dets,
                 local_dets,
                 bias2det,
-                det2position,
             )
             self._add_jumps(
                 comm, obs_id, times, focalplane, signal, all_dets, local_dets, bias2det
