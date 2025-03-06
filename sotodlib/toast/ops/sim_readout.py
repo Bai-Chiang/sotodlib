@@ -623,16 +623,37 @@ class SimReadout(Operator):
             focalplane = obs.telescope.focalplane
             signal = obs.detdata[self.det_data]
 
+            if 'tube_slot' in focalplane.detector_data.keys():
+                tube_slot_key = 'tube_slot'
+            elif 'det_info:tel_tube' in focalplane.detector_data.keys():
+                tube_slot_key = 'det_info:tel_tube'
+            else:
+                raise RuntimeError("Can't find 'tude_slot' or 'det_info:tel_tube' in focalplane.detector_data")
+
+            if 'wafer_slot' in focalplane.detector_data.keys():
+                wafer_slot_key = 'wafer_slot'
+            elif 'det_info:wafer_slot' in focalplane.detector_data.keys():
+                wafer_slot_key = 'det_info:wafer_slot'
+            else:
+                raise RuntimeError("Can't find 'wafer_slot' or 'det_info:wafer_slot' in focalplane.detector_data")
+
+            if 'bias' in focalplane.detector_data.keys():
+                bias_key = 'bias'
+            elif 'det_info:wafer:bias_line' in focalplane.detector_data.keys():
+                bias_key = 'det_info:wafer:bias_line'
+            else:
+                raise RuntimeError("Can't find 'bias' or 'det_info:wafer:bias_line' in focalplane.detector_data")
+
             # Map bias lines to detectors
             bias2det = {}
             for det in local_dets:
-                tube = focalplane[det]["tube_slot"]
+                tube = focalplane[det][tube_slot_key]
                 if tube not in bias2det:
                     bias2det[tube] = {}
-                wafer = focalplane[det]["wafer_slot"]
+                wafer = focalplane[det][wafer_slot_key]
                 if wafer not in bias2det[tube]:
                     bias2det[tube][wafer] = {}
-                bias = focalplane[det]["bias"]
+                bias = focalplane[det][bias_key]
                 if bias not in bias2det[tube][wafer]:
                     bias2det[tube][wafer][bias] = []
                 bias2det[tube][wafer][bias].append(det)
