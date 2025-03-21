@@ -149,12 +149,25 @@ class SimReadout(Operator):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
 
-    def _simulate_events(self, seed, nsample, events_per_sample):
-        """Simulate a Poissonian distribution of events"""
+    def _simulate_events(self, seed, times, rate):
+        """Simulate a Poissonian Process based on rate.
+        times: np.array of time stamps
+        rate: event occurrence rate in unit Hz
+        """
         np.random.seed(int(seed) % 2**32)
-        event_counts = np.random.poisson(events_per_sample, nsample)
-        event_indices = np.argwhere(event_counts).ravel()
-        event_counts = event_counts[event_indices].copy()
+        event_time = times[0]
+        event_indices = []
+        while event_time < times[-1]:
+            # Sample next event based on the interval between two events
+            # which follows exponential distribution.
+            interval = np.random.exponential(scale=1.0/rate)
+            event_time += interval
+            if event_time < times[-1]:
+                # Find the time stamp cloest to event_time
+                event_indices.append(
+                        np.argmin(np.abs( times-event_time ))
+                        )
+        event_counts = len(event_indices)
         return event_counts, event_indices
 
     def _simulate_amplitudes(
@@ -166,26 +179,24 @@ class SimReadout(Operator):
         # If we routinely have more than one event occurring during
         # the same time stamp we are in trouble
         np.random.seed(int(seed) % 2**32)
-        n = event_counts.size
-        amplitudes = amplitude_center + np.random.randn(n) * amplitude_sigma
-        events = amplitudes * event_counts
-        return events
+        amplitudes = amplitude_center + np.random.randn(event_counts) * amplitude_sigma
+        return amplitudes
 
     def _add_uncorrelated_glitches(
-            self, comm, signal, obs_id, focalplane, fsample, nsample, local_dets
+            self, comm, signal, obs_id, focalplane, fsample, times, local_dets
     ):
         """Simulate uncorrelated electronic glitches"""
         log = Logger.get()
 
-        events_per_sample = self.glitch_rate.to_value(u.Hz) / fsample.to_value(u.Hz)
+        ndets = len(local_dets)
         nglitch = 0
         for det in local_dets:
             det_id = focalplane[det]["uid"]
             sig = signal[det]
             event_counts, event_indices = self._simulate_events(
                 obs_id + det_id  + self.realization + 8123765,
-                nsample,
-                events_per_sample,
+                times,
+                self.glitch_rate.to_value(u.Hz),
             )
             events = self._simulate_amplitudes(
                 obs_id + det_id  + self.realization + 150243972,
@@ -195,34 +206,39 @@ class SimReadout(Operator):
             )
             # Add delta-function glitches
             sig[event_indices] += events
-            nglitch += np.sum(event_counts)
+            nglitch += event_counts
 
         if comm is not None:
             nglitch = comm.allreduce(nglitch)
-        log.debug_rank(f"Simulated {nglitch} uncorrelated glitches", comm=comm)
+            ndets = comm.allreduce(ndets)
+        msg = "Simulated {} uncorrelated glitches with average rate {:.5f} Hz".format(
+                nglitch,
+                nglitch/((times[-1]-times[0])*ndets)
+                )
+        log.debug_rank(msg, comm=comm)
 
         return
 
     def _add_correlated_glitches(
-            self, comm, signal, obs_id, focalplane, fsample, nsample, bias2det
+            self, comm, signal, obs_id, focalplane, fsample, times, bias2det
     ):
         """Simulate bias line glitches"""
         log = Logger.get()
 
-        events_per_sample = self.bias_line_glitch_rate.to_value(u.Hz) \
-                            / fsample.to_value(u.Hz)
+        nbias = 0
         nglitch = 0
         for tube, wafers in bias2det.items():
             tube_id = name_UID(tube)
             for wafer, biases in wafers.items():
                 wafer_id = name_UID(wafer)
+                nbias += len(biases)
                 for bias, dets in biases.items():
                     # The event locations on the bias line are shared
                     event_counts, event_indices = self._simulate_events(
                         obs_id + tube_id + wafer_id + bias  + self.realization \
                         + 5295629,
-                        nsample,
-                        events_per_sample,
+                        times,
+                        self.bias_line_glitch_rate.to_value(u.Hz),
                     )
                     # Base amplitude is shared ...
                     events = self._simulate_amplitudes(
@@ -244,11 +260,16 @@ class SimReadout(Operator):
                         scale[scale < 0] = 0
                         # Add delta-function glitches
                         sig[event_indices] += events * scale
-                    nglitch += np.sum(event_counts)
+                    nglitch += event_counts
 
         if comm is not None:
             nglitch = comm.allreduce(nglitch)
-        log.debug_rank(f"Simulated {nglitch} correlated glitches", comm=comm)
+            nbias = comm.allreduce(nbias)
+        msg = "Simulated {} correlated glitches with average rate {:.5f} Hz".format(
+                nglitch,
+                nglitch/((times[-1]-times[0])*nbias)
+                )
+        log.debug_rank(msg, comm=comm)
 
         return
 
@@ -259,7 +280,7 @@ class SimReadout(Operator):
             obs_id,
             focalplane,
             fsample,
-            nsample,
+            times,
             local_dets,
     ):
         """Simulate cosmic ray glitches
@@ -306,11 +327,10 @@ class SimReadout(Operator):
             comm=comm,
         )
 
-        events_per_sample = glitch_rate / fsample.to_value(u.Hz)
         event_counts, event_indices = self._simulate_events(
             obs_id + self.realization + 98552896,
-            nsample,
-            events_per_sample,
+            times,
+            glitch_rate,
         )
 
         # Generate a glitch profile that we will re-use
@@ -376,16 +396,15 @@ class SimReadout(Operator):
             return
 
         fsample = focalplane.sample_rate
-        nsample = times.size
 
         if self.glitch_rate != 0:
             self._add_uncorrelated_glitches(
-                comm, signal, obs_id, focalplane, fsample, nsample, local_dets
+                comm, signal, obs_id, focalplane, fsample, times, local_dets
             )
 
         if self.bias_line_glitch_rate != 0:
             self._add_correlated_glitches(
-                comm, signal, obs_id, focalplane, fsample, nsample, bias2det
+                comm, signal, obs_id, focalplane, fsample, times, bias2det
             )
 
         if self.cosmic_ray_glitch_rate != 0:
@@ -395,7 +414,7 @@ class SimReadout(Operator):
                 obs_id,
                 focalplane,
                 fsample,
-                nsample,
+                times,
                 local_dets,
             )
 
@@ -418,18 +437,16 @@ class SimReadout(Operator):
             return
         log = Logger.get()
         fsample = focalplane.sample_rate
-        nsample = times.size
 
         # Uncorrelated jumps
-        events_per_sample = self.jump_rate.to_value(u.Hz) / fsample.to_value(u.Hz)
         njump = 0
         for det in local_dets:
             det_id = focalplane[det]["uid"]
             sig = signal[det]
             event_counts, event_indices = self._simulate_events(
                 obs_id + det_id  + self.realization + 45835364,
-                nsample,
-                events_per_sample,
+                times,
+                self.jump_rate.to_value(u.Hz),
             )
             events = self._simulate_amplitudes(
                 obs_id + det_id  + self.realization + 250243972,
@@ -440,15 +457,13 @@ class SimReadout(Operator):
             # Change baseline at every event
             for index, event in zip(event_indices, events):
                 sig[index:] += event
-            njump += np.sum(event_counts)
+            njump += event_counts
 
         if comm is not None:
             njump = comm.allreduce(njump)
         log.debug_rank(f"Simulated {njump} uncorrelated jumps", comm=comm)
 
         # Bias line jumps
-        events_per_sample = self.bias_line_jump_rate.to_value(u.Hz) \
-                            / fsample.to_value(u.Hz)
         njump = 0
         for tube, wafers in bias2det.items():
             tube_id = name_UID(tube)
@@ -458,8 +473,8 @@ class SimReadout(Operator):
                     # The event locations on the bias line are shared
                     event_counts, event_indices = self._simulate_events(
                         obs_id + tube_id + wafer_id + bias  + self.realization + 936582,
-                        nsample,
-                        events_per_sample,
+                        times,
+                        self.bias_line_jump_rate.to_value(u.Hz),
                     )
                     # Base amplitude is shared ...
                     events = self._simulate_amplitudes(
@@ -482,7 +497,7 @@ class SimReadout(Operator):
                         # Change baseline at every event
                         for index, event in zip(event_indices, events * scale):
                             sig[index:] += event
-                    njump += np.sum(event_counts)
+                    njump += event_counts
 
         if comm is not None:
             njump = comm.allreduce(njump)
